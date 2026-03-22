@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Capital One Offers Ultimate API Scraper
 // @namespace    http://tampermonkey.net/
-// @version      4.4
-// @description  游标分页极速抓取 50+ 页，原生 UUID 替换突破 Bad Request 完美激活
+// @version      4.5
+// @description  游标分页极速抓取，完美 UUID 激活，修复面板开关逻辑 (分离 Fetch 与 Toggle)
 // @author       You
 // @match        https://capitaloneshopping.com/*
 // @grant        none
@@ -13,7 +13,7 @@
 
     const API_ENDPOINT = 'https://capitaloneshopping.com/api/v1/feed';
     const LIMIT = 25;
-    const MAX_PAGES = 200;
+    const MAX_PAGES = 200; 
 
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -30,7 +30,7 @@
                 merchant: item.merchantName || 'Unknown',
                 reward: stats.cashbackV2 || stats.cashback || '',
                 exclusions: stats.exclusionsText || 'None',
-                link: item.href || ''
+                link: item.href || '' 
             };
         });
 
@@ -38,11 +38,11 @@
     }
 
     // ==========================================
-    // 🚀 核心极速抓取引擎 (并发突破 50+ 页)
+    // 🚀 核心极速抓取引擎
     // ==========================================
     async function fetchAllOffersViaAPI(statusCallback) {
         let allOffers = [];
-        let currentToken = null;
+        let currentToken = null; 
         let pageCount = 0;
         let hasMore = true;
 
@@ -57,21 +57,10 @@
                     }
                 },
                 "context": {
-                    "device": {
-                        "memory": String(navigator.deviceMemory || 8),
-                        "concurrency": String(navigator.hardwareConcurrency || 8)
-                    },
-                    "browser": {
-                        "name": "Chrome",
-                        "version": navigator.userAgent.match(/Chrome\/(\d+\.\d+\.\d+\.\d+)/)?.[1] || "146.0.0.0",
-                        "major": navigator.userAgent.match(/Chrome\/(\d+)/)?.[1] || "146"
-                    },
+                    "device": { "memory": "8", "concurrency": "8" },
+                    "browser": { "name": "Chrome", "version": "146.0.0.0", "major": "146" },
                     "os": { "name": "Windows", "version": "10" },
-                    "screen": {
-                        "width": window.screen.width,
-                        "height": window.screen.height,
-                        "density": window.devicePixelRatio || 1
-                    },
+                    "screen": { "width": 2560, "height": 1080, "density": 1 },
                     "locale": navigator.language || "en-US",
                     "country": "US",
                     "location": { "state": "NJ", "zipcode": "07302" },
@@ -95,7 +84,7 @@
             while (!success && retries < maxRetries) {
                 try {
                     statusCallback(`⚡ Fetching Page ${pageCount}...`);
-
+                    
                     const response = await fetch(API_ENDPOINT, {
                         method: 'POST',
                         headers: {
@@ -105,20 +94,19 @@
                         body: JSON.stringify(payload)
                     });
 
-                    // 指数退避重试，防止 429 封禁
                     if (response.status === 429) {
                         retries++;
-                        const backoffTime = 1000 * Math.pow(2, retries);
+                        const backoffTime = 1000 * Math.pow(2, retries); 
                         statusCallback(`⚠️ 触发限频 (429), 退避等待 ${backoffTime}ms...`);
                         await sleep(backoffTime);
-                        continue;
+                        continue; 
                     }
 
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
+                    
                     const data = await response.json();
                     const { items, nextToken } = parseResponseData(data);
-
+                    
                     if (items.length === 0) {
                         hasMore = false;
                         break;
@@ -132,7 +120,7 @@
                     } else {
                         hasMore = false;
                     }
-
+                    
                     success = true;
 
                 } catch (error) {
@@ -147,7 +135,6 @@
             }
         }
 
-        // 复合键哈希去重
         const seenKeys = new Set();
         const uniqueData = allOffers.filter(r => {
             if (r.merchant === 'Unknown' || r.reward === '') return false;
@@ -180,22 +167,29 @@
         #scraper-container.expanded { width: 750px; max-height: 80vh; }
         .header { background: #004d73; color: white; padding: 10px; display: flex; flex-direction: column; gap: 8px; user-select: none; }
         .header-btn {
-            background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+            background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); 
             color: white; padding: 8px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 600; transition: background 0.2s;
         }
         .header-btn:hover { background: rgba(255,255,255,0.2); }
         .header-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        /* 针对不同按钮的特定颜色 */
+        #btn-api-fetch { background: #f60859; border-color: #d5044b; }
+        #btn-api-fetch:hover { background: #d5044b; }
+        #btn-toggle { background: #0276b1; border-color: #005a87; }
+        #btn-toggle:hover { background: #005a87; }
+        
         #live-status { font-size: 11px; text-align: center; color: #bae6fd; font-family: monospace; }
         .content { display: none; flex-direction: column; overflow: hidden; }
-        #scraper-container.expanded .content { display: flex; height: calc(80vh - 80px); }
+        #scraper-container.expanded .content { display: flex; height: calc(80vh - 120px); }
         .toolbar { padding: 8px 16px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; display: flex; gap: 10px; align-items: center; }
         #search-input { flex: 1; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; outline: none; }
-        .tool-btn { padding: 6px 12px; background: #f60859; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500; }
+        .tool-btn { padding: 6px 12px; background: #0276b1; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500; }
         .table-container { overflow-y: auto; flex: 1; padding: 0; }
         table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
         th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid #e2e8f0; word-wrap: break-word; }
         th { background: #f1f5f9; position: sticky; top: 0; font-weight: 600; color: #475569; }
-        th:nth-child(1) { width: 25%; } th:nth-child(2) { width: 20%; } th:nth-child(3) { width: 15%; } th:nth-child(4) { width: 40%; }
+        th:nth-child(1) { width: 25%; } th:nth-child(2) { width: 20%; } th:nth-child(3) { width: 15%; } th:nth-child(4) { width: 40%; } 
         tr:hover { background: #f8fafc; }
         .reward-cell { color: #15803d; font-weight: 600; }
         .exclusions-cell { font-size: 11px; color: #64748b; }
@@ -210,10 +204,12 @@
 
     const container = document.createElement('div');
     container.id = 'scraper-container';
+    
+    // UI 结构更新：将 Fetch 和 Toggle 作为两个并排或独立的按钮
     container.innerHTML = `
         <div class="header">
-            <button class="header-btn" id="btn-api-fetch">⚡ Turbo API Fetch All</button>
-            <button class="header-btn" id="btn-close" style="display:none; background: #003b57;">✖ Close Panel</button>
+            <button class="header-btn" id="btn-api-fetch">⚡ Refresh API Data</button>
+            <button class="header-btn" id="btn-toggle" style="display:none;">▼ Show Panel</button>
             <div id="live-status">Ready.</div>
         </div>
         <div class="content">
@@ -232,7 +228,7 @@
     shadow.appendChild(container);
 
     const btnApiFetch = shadow.getElementById('btn-api-fetch');
-    const btnClose = shadow.getElementById('btn-close');
+    const btnToggle = shadow.getElementById('btn-toggle');
     const liveStatus = shadow.getElementById('live-status');
     const tbody = shadow.getElementById('table-body');
     const searchInput = shadow.getElementById('search-input');
@@ -244,7 +240,7 @@
         tbody.innerHTML = '';
         data.forEach(item => {
             const tr = document.createElement('tr');
-            const actionHtml = item.link
+            const actionHtml = item.link 
                 ? `<button class="activate-btn" data-href="${item.link}">🚀 Activate</button>`
                 : `<button class="activate-btn" disabled>No Link</button>`;
 
@@ -258,56 +254,54 @@
         });
     }
 
-    // ==========================================
-    // 🎯 核心破解：动态注入合法 UUID 绕过拦截
-    // ==========================================
+    // 动态注入合法 UUID 绕过拦截
     tbody.addEventListener('click', (e) => {
         if (e.target.classList.contains('activate-btn')) {
             let targetUrl = e.target.getAttribute('data-href');
             if (targetUrl) {
-                // 采用降级兼容方案生成标准 UUID v4
                 const generateUUID = () => {
-                    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-                        return crypto.randomUUID();
-                    }
+                    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
                     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
                         const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
                         return v.toString(16);
                     });
                 };
-
-                // 将占位符替换为真实的格式化 UUID
                 const finalUrl = targetUrl.replace('__WBCLICKID__', generateUUID());
                 window.open(finalUrl, '_blank');
             }
         }
     });
 
+    // 抓取逻辑
     btnApiFetch.addEventListener('click', async () => {
         btnApiFetch.disabled = true;
-        btnApiFetch.innerText = 'Fetching Data...';
-
+        btnApiFetch.innerText = 'Fetching...';
+        btnToggle.style.display = 'none'; // 抓取时隐藏 Toggle
+        
         currentData = await fetchAllOffersViaAPI((msg) => { liveStatus.innerText = msg; });
-
+        
         if (currentData.length > 0) {
             searchInput.value = '';
             renderTable(currentData);
             container.classList.add('expanded');
-            btnApiFetch.style.display = 'none';
-            btnClose.style.display = 'block';
-        } else {
-            btnApiFetch.disabled = false;
-            btnApiFetch.innerText = '⚡ Turbo API Fetch All';
+            btnToggle.style.display = 'block';
+            btnToggle.innerText = '▲ Hide Panel';
         }
+        
+        btnApiFetch.disabled = false;
+        btnApiFetch.innerText = '⚡ Refresh API Data';
     });
 
-    btnClose.addEventListener('click', () => {
-        container.classList.remove('expanded');
-        btnApiFetch.style.display = 'block';
-        btnClose.style.display = 'none';
-        btnApiFetch.disabled = false;
-        btnApiFetch.innerText = '⚡ Turbo API Fetch All';
-        liveStatus.innerText = `Idle (${currentData.length} unique records)`;
+    // 独立的 Toggle 逻辑：不再丢弃数据
+    btnToggle.addEventListener('click', () => {
+        const isExpanded = container.classList.contains('expanded');
+        if (isExpanded) {
+            container.classList.remove('expanded');
+            btnToggle.innerText = `▼ Show Panel (${currentData.length} Deals)`;
+        } else {
+            container.classList.add('expanded');
+            btnToggle.innerText = '▲ Hide Panel';
+        }
     });
 
     searchInput.addEventListener('input', (e) => {
@@ -319,7 +313,7 @@
         const term = searchInput.value.toLowerCase().trim();
         const dataToExport = (term ? currentData.filter(item => item.merchant.toLowerCase().includes(term)) : currentData)
             .map(({ link, ...rest }) => rest);
-
+            
         if (dataToExport.length === 0) return;
         try {
             await navigator.clipboard.writeText(JSON.stringify(dataToExport, null, 2));

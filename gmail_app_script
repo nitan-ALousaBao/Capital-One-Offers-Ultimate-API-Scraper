@@ -1,0 +1,132 @@
+function doGet(e) {
+  const query = 'from:hello@capitaloneshopping.com newer_than:4d';
+  const threads = GmailApp.search(query, 0, 40);
+  let rawOffers = [];
+  
+  // 日志计数器
+  let logStats = { todayTop: 0, otherOffers: 0, textOffers: 0 };
+
+  const now = new Date();
+  const currentYear = now.getFullYear();
+
+  function cleanText(str) {
+    if (!str) return "";
+    return str.replace(/<[^>]+>/g, '').replace(/&[^;]+;/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function parseDate(dateStr) {
+    if (!dateStr) return null;
+    let fullDateStr = dateStr;
+    if (!fullDateStr.match(/\d{4}/)) fullDateStr += ", " + currentYear;
+    let d = new Date(fullDateStr);
+    d.setHours(23, 59, 59, 999);
+    return d;
+  }
+
+  threads.forEach(thread => {
+    const messages = thread.getMessages();
+    messages.forEach(msg => {
+      const msgDate = msg.getDate();
+      const isMsgFromToday = msgDate.toDateString() === now.toDateString();
+      const htmlBody = msg.getBody();
+      
+      const links = [];
+      const linkRegex = /href="(https:\/\/capitaloneshopping\.com\/(?:api\/v1\/wrapped-link|track\/email|api\/v1\/redirectV2)[^"]+)"/gi;
+      let lM;
+      while ((lM = linkRegex.exec(htmlBody)) !== null) { links.push({ url: lM[1], index: lM.index }); }
+      if (links.length === 0) return;
+
+      const getLink = (idx, sectionOffset = 0) => {
+        let closest = links[0].url, minDiff = 10000;
+        for (let l of links) {
+          let diff = Math.abs(l.index - (sectionOffset + idx));
+          if (diff < minDiff) { minDiff = diff; closest = l.url; }
+        }
+        return closest;
+      };
+
+      // --- 1. 处理 Today's Top Offers 模块 ---
+      if (isMsgFromToday && /Today's Top Offers/i.test(htmlBody)) {
+        const parts = htmlBody.split(/Today's Top Offers/i);
+        const todaySection = parts[1]?.split(/Other offers/i)[0];
+        if (todaySection) {
+          const sectionOffset = htmlBody.indexOf(todaySection);
+          const todayRegex = /Get\s+([\d.]+(?:%|\$)\s+back)\s+at\s+([^<|\n|\r]+)/gi;
+          let tM;
+          while ((tM = todayRegex.exec(todaySection)) !== null) {
+            let merchant = cleanText(tM[2]).split(/Up to/i)[0].trim();
+            if (merchant.length > 2 && merchant.length < 40) {
+              rawOffers.push({
+                merchant,
+                reward: cleanText(tM[1]) + " 💌",
+                link: getLink(tM.index, sectionOffset),
+                exclusions: "⚡ Today's Top"
+              });
+              logStats.todayTop++;
+            }
+          }
+        }
+      }
+
+      // --- 2. 处理 Other Offers 模块 ---
+      const otherSection = htmlBody.split(/Other offers/i)[1] || htmlBody;
+      const sectionOffsetOther = htmlBody.indexOf(otherSection);
+      const dateMatch = otherSection.match(/ends on\s+([a-zA-Z]{3,}\s+\d{1,2}(?:,\s*\d{4})?)/i);
+      const expDate = dateMatch ? parseDate(dateMatch[1]) : null;
+
+      if (expDate && now > expDate) return;
+
+      // A. 24px 列表抓取
+      const listRegex = /<td[^>]*font-size:\s*24px[^>]*>([\s\S]*?)<\/td>[\s\S]{0,1000}?<span[^>]*color:\s*green[^>]*>([\s\S]*?)<\/span>/gi;
+      let listM;
+      while ((listM = listRegex.exec(otherSection)) !== null) {
+        let merchant = cleanText(listM[1]);
+        if (merchant.length > 2 && merchant.length < 40) {
+          rawOffers.push({
+            merchant,
+            reward: cleanText(listM[2]) + " 💌",
+            link: getLink(listM.index, sectionOffsetOther),
+            exclusions: dateMatch ? `Exp: ${dateMatch[1]}` : "Email Offer"
+          });
+          logStats.otherOffers++;
+        }
+      }
+      
+      // B. 文本格式抓取 (topresume.com 30% Back)
+      const textOfferRegex = /([a-z0-9.-]+\.[a-z]{2,})\s*(\d+%\s*Back)/gi;
+      let textM;
+      while ((textM = textOfferRegex.exec(otherSection)) !== null) {
+        rawOffers.push({
+          merchant: textM[1],
+          reward: textM[2] + " 💌",
+          link: getLink(textM.index, sectionOffsetOther),
+          exclusions: dateMatch ? `Exp: ${dateMatch[1]}` : "Email Offer"
+        });
+        logStats.textOffers++;
+      }
+    });
+  });
+
+  // 去重
+  let unique = [];
+  let seen = new Set();
+  rawOffers.forEach(o => {
+    const key = `${o.merchant.toLowerCase()}|${o.reward}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(o);
+    }
+  });
+
+  // ==========================================
+  // 📜 结果日志输出 (控制台可见)
+  // ==========================================
+  console.log(`[C1 Scraper Log] 运行时间: ${now.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+  console.log(`数据概览: 今天大Offer(${logStats.todayTop}), 常规列表(${logStats.otherOffers}), 文本列表(${logStats.textOffers})`);
+  console.log(`去重后最终输出数量: ${unique.length}`);
+  if (unique.length > 0) {
+    console.log("样本明细: " + unique.slice(0, 3).map(u => `${u.merchant}(${u.reward})`).join(" | "));
+  }
+
+  return ContentService.createTextOutput(JSON.stringify({ items: unique })).setMimeType(ContentService.MimeType.JSON);
+}

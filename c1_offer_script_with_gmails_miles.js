@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Capital One Offers Ultimate (v34.0 Final)
+// @name         Capital One Offers Ultimate (v41.0 Miles-Label)
 // @namespace    http://tampermonkey.net/
-// @version      34.0
-// @description  支持关闭 Miles 功能，窗口左上角自由拖拽，模块化抓取，CPP 动态估值
+// @version      41.0
+// @description  移除 Miles 链接改为标签显示，Web 保持 UUID 激活追踪，支持 CPP 换算与左上角拖拽
 // @author       ALousaBao
 // @match        https://capitaloneshopping.com/*
 // @match        https://capitaloneoffers.com/*
@@ -33,6 +33,14 @@
         milesDisabled: GM_getValue('c1_miles_disabled', false)
     });
 
+    const generateUUID = () => {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    };
+
     function updateStatus(msg = null) {
         if (!shadow) return;
         const bar = shadow.getElementById('status-bar');
@@ -54,19 +62,15 @@
         else { card.classList.remove('exp'); btn.innerText = '[+]'; }
     }
 
-    // ==========================================
-    // 📡 跨标签页监听逻辑
-    // ==========================================
     GM_addValueChangeListener('distributed_miles_payload', (n, o, val) => {
         if (!val || getConfig().milesDisabled) return;
-        try {
-            const payload = JSON.parse(val);
-            const newMiles = payload.data.filter(item => !currentData.some(i => i.merchant === item.merchant && i.reward === item.reward));
-            currentData.push(...newMiles);
-            counts.miles += newMiles.length;
-            refreshDisplay();
-            updateStatus();
-        } catch(e) {}
+        const payload = JSON.parse(val);
+        payload.data.forEach(item => {
+            if (!currentData.some(i => i.merchant === item.merchant && i.reward === item.reward)) {
+                currentData.push(item); counts.miles++;
+            }
+        });
+        refreshDisplay(); updateStatus();
     });
 
     // ==========================================
@@ -77,7 +81,7 @@
         if (token && token.length > 20) GM_setValue('vx_token_bus', token);
         const btn = document.createElement('button');
         btn.innerHTML = '🛰️ Sniff & Sync Miles';
-        btn.style.cssText = 'position:fixed; bottom:40px; right:40px; z-index:2147483647; padding:20px 30px; background:#10b981; color:white; border:none; border-radius:50px; font-weight:bold; cursor:pointer; box-shadow:0 10px 30px rgba(0,0,0,0.4); font-size:18px; border:3px solid #fff;';
+        btn.style.cssText = 'position:fixed; bottom:40px; right:40px; z-index:2147483647; padding:20px 30px; background:#10b981; color:white; border:none; border-radius:50px; font-weight:bold; cursor:pointer; box-shadow:0 10px 30px rgba(16,185,129,0.4); font-size:18px; border:3px solid #fff;';
         btn.onclick = () => {
             const resources = performance.getEntriesByType('resource');
             const feedReq = resources.find(r => r.name.includes('/feed/') && r.name.includes('contentSlug='));
@@ -94,7 +98,7 @@
                             if (obj.merchantTLD && (obj.buttonText || obj.rateText)) {
                                 let r = obj.buttonText || obj.rateText || "";
                                 if (r.toLowerCase().includes('miles')) {
-                                    let n = obj.merchantTLD.split('.')[0].replace(/[^a-zA-Z0-9-]/g, '').replace(/^\w/, c => c.toUpperCase());
+                                    let n = obj.merchantTLD.split('.')[0].replace(/^\w/, c => c.toUpperCase());
                                     extracted.push({ merchant: n, reward: r + " ✈️", exclusions: '💳 VX Card', link: '', source: 'miles' });
                                 }
                             }
@@ -108,8 +112,7 @@
                 }
             });
         };
-        document.body.appendChild(btn);
-        return;
+        document.body.appendChild(btn); return;
     }
 
     // ==========================================
@@ -143,18 +146,13 @@
         const conf = getConfig();
         const filterVal = shadow.getElementById('f-src').value;
         const searchInput = shadow.getElementById('search-in').value.toLowerCase();
-
-        // 动态隐藏/显示 Miles 按钮
         shadow.getElementById('btn-miles').style.display = conf.milesDisabled ? 'none' : 'block';
         shadow.getElementById('btn-group-box').style.gridTemplateColumns = conf.milesDisabled ? '1fr 1fr' : '1fr 1fr 1fr';
-
         shadow.getElementById('th-name').querySelector('span').innerText = ` ${sortConfig.key === 'name' ? (sortConfig.dir === 'asc' ? '↑' : '↓') : '⇅'}`;
         shadow.getElementById('th-reward').querySelector('span').innerText = ` ${sortConfig.key === 'reward' ? (sortConfig.dir === 'asc' ? '↑' : '↓') : '⇅'}`;
 
         let data = [...currentData];
-        // 核心：如果关闭了 Miles，直接在源头滤掉
         if (conf.milesDisabled) data = data.filter(i => i.source !== 'miles');
-
         if (searchInput) data = data.filter(i => i.merchant.toLowerCase().includes(searchInput));
         if (filterVal === 'email') data = data.filter(i => i.reward.includes('💌'));
         else if (filterVal === 'miles') data = data.filter(i => i.reward.includes('✈️'));
@@ -191,15 +189,25 @@
             const tr = document.createElement('tr');
             if(best.reward.includes('✈️')) tr.style.borderLeft = '4px solid #0ea5e9';
             if(best.reward.includes('💌')) tr.style.backgroundColor = '#fff7ed';
-            tr.innerHTML = `<td style="width:180px"><strong>${best.merchant}</strong> ${g.items.length > 1 ? `<button class="tgl" data-t="${gid}">▶ ${g.items.length-1}</button>` : ''}</td><td style="color:#15803d; font-weight:bold; width:120px;">${best.reward}</td><td style="width:80px">${best.link ? `<button class="act" data-h="${best.link}">🚀 Go</button>` : `<small>Portal</small>`}</td><td style="color:#64748b; font-size:11px;">${best.exclusions || 'None'}</td>`;
+
+            // 🚀 核心逻辑：如果是 Miles，不显示按钮，显示文本标签
+            const actionCell = (best.source === 'miles')
+                ? `<small style="color:#64748b; font-weight:600;">✈️ Miles Offer</small>`
+                : `<button class="act" data-h="${best.link}">🚀 Go</button>`;
+
+            tr.innerHTML = `<td style="width:180px"><strong>${best.merchant}</strong> ${g.items.length > 1 ? `<button class="tgl" data-t="${gid}">▶ ${g.items.length-1}</button>` : ''}</td><td style="color:#15803d; font-weight:bold; width:120px;">${best.reward}</td><td style="width:80px">${actionCell}</td><td style="color:#64748b; font-size:11px;">${best.exclusions || 'None'}</td>`;
             tbody.appendChild(tr);
+
             if(g.items.length > 1) {
                 g.items.slice(1).forEach(c => {
                     const ctr = document.createElement('tr');
                     ctr.className = `child ${gid}`;
                     ctr.style.display = 'none';
                     ctr.style.backgroundColor = '#f8fafc';
-                    ctr.innerHTML = `<td style="padding-left:25px; color:#475569;">↳ ${c.merchant}</td><td style="color:#475569;">${c.reward}</td><td>${c.link ? `<button class="act" data-h="${c.link}">🚀</button>` : ''}</td><td style="font-size:11px; color:#94a3b8;">${c.exclusions || 'None'}</td>`;
+                    const childAction = (c.source === 'miles')
+                        ? `<small style="color:#94a3b8;">✈️ Miles</small>`
+                        : `<button class="act" data-h="${c.link}">🚀</button>`;
+                    ctr.innerHTML = `<td style="padding-left:25px; color:#475569;">↳ ${c.merchant}</td><td style="color:#475569;">${c.reward}</td><td>${childAction}</td><td style="font-size:11px; color:#94a3b8;">${c.exclusions || 'None'}</td>`;
                     tbody.appendChild(ctr);
                 });
             }
@@ -217,8 +225,14 @@
                     body: JSON.stringify({ "contentProps": {"pagination": {"limit": 100, ...(webToken?{"nextPageToken":webToken}:{})}}, "context": {"location": {"state": conf.state, "zipcode": conf.zip}}})
                 });
                 const d = await res.json();
-                if (!d.items || d.items.length === 0) break;
-                pushDataBatch(d.items.map(i => ({ merchant: i.merchantDisplayText || i.merchantName || i.brandName || 'Unknown', reward: i.stats.cashbackV2, exclusions: i.stats.exclusionsText, link: i.href })), 'web');
+                if (!d.items) break;
+                pushDataBatch(d.items.map(i => ({
+                    merchant: i.merchantName || i.merchantDisplayText || 'Unknown',
+                    reward: i.stats.cashbackV2 || '',
+                    exclusions: i.stats.exclusionsText || 'None',
+                    link: i.href || '',
+                    source: 'web'
+                })), 'web');
                 webToken = d.pagination?.nextPageToken;
                 pages++; if (!webToken) break;
             } catch(e) { break; }
@@ -227,14 +241,16 @@
     }
 
     function fetchEmail() {
-        const conf = getConfig(); if (!conf.url) return alert("GAS URL missing.");
+        const conf = getConfig(); if (!conf.url) return;
         counts.email = 0; currentData = currentData.filter(i => i.source !== 'email');
         GM_xmlhttpRequest({
             method: "GET", url: conf.url, timeout: 20000,
             onload: (res) => {
-                const d = JSON.parse(res.responseText);
-                if(d.items) pushDataBatch(d.items, 'email');
-                refreshDisplay();
+                try {
+                    const d = JSON.parse(res.responseText);
+                    if(d.items) pushDataBatch(d.items, 'email');
+                    refreshDisplay();
+                } catch(e) {}
             }
         });
     }
@@ -248,22 +264,24 @@
             method: "GET", url: `https://capitaloneoffers.com/feed/${token}?contentSlug=ease-web-l1&_data=routes%2Ffeed.%24accountReferenceId`,
             headers: { "x-remix-fetch": "yes", "Accept": "application/json" },
             onload: (res) => {
-                const json = JSON.parse(res.responseText);
-                let extracted = [];
-                function dfs(obj) {
-                    if (Array.isArray(obj)) obj.forEach(dfs);
-                    else if (typeof obj === 'object' && obj !== null) {
-                        if (obj.merchantTLD && (obj.buttonText || obj.rateText)) {
-                            let r = obj.buttonText || obj.rateText || "";
-                            if (r.toLowerCase().includes('miles')) {
-                                let n = obj.merchantTLD.split('.')[0].replace(/[^a-zA-Z0-9-]/g, '').replace(/^\w/, c => c.toUpperCase());
-                                extracted.push({ merchant: n, reward: r + " ✈️", exclusions: '💳 VX Offer', link: '', source: 'miles' });
+                try {
+                    const json = JSON.parse(res.responseText);
+                    let extracted = [];
+                    function dfs(obj) {
+                        if (Array.isArray(obj)) obj.forEach(dfs);
+                        else if (typeof obj === 'object' && obj !== null) {
+                            if (obj.merchantTLD && (obj.buttonText || obj.rateText)) {
+                                let r = obj.buttonText || obj.rateText || "";
+                                if (r.toLowerCase().includes('miles')) {
+                                    let n = obj.merchantTLD.split('.')[0].replace(/^\w/, c => c.toUpperCase());
+                                    extracted.push({ merchant: n, reward: r + " ✈️", exclusions: '💳 VX Card', link: '', source: 'miles' });
+                                }
                             }
+                            Object.values(obj).forEach(dfs);
                         }
-                        Object.values(obj).forEach(dfs);
                     }
-                }
-                dfs(json); pushDataBatch(extracted, 'miles'); refreshDisplay();
+                    dfs(json); pushDataBatch(extracted, 'miles'); refreshDisplay();
+                } catch(e) {}
             }
         });
     }
@@ -299,39 +317,24 @@
                     <span id="btn-toggle">[+]</span>
                 </div>
                 <button class="btn-all" id="btn-all">🚀 Start All-Fetch</button>
-                <div class="btn-group" id="btn-group-box">
-                    <button class="btn-sm" id="btn-web">🌐 Web</button>
-                    <button class="btn-sm" id="btn-mail">📧 Email</button>
-                    <button class="btn-sm" id="btn-miles">✈️ Miles</button>
-                </div>
+                <div class="btn-group" id="btn-group-box"><button class="btn-sm" id="btn-web">🌐 Web</button><button class="btn-sm" id="btn-mail">📧 Email</button><button class="btn-sm" id="btn-miles">✈️ Miles</button></div>
                 <div id="status-bar" style="font-size:11px;color:#bae6fd;text-align:center;font-family:monospace;background:rgba(0,0,0,0.2);padding:4px;border-radius:4px;">Ready.</div>
                 <button id="stg-btn" style="background:transparent;border:1px solid #fff;color:#fff;font-size:10px;cursor:pointer;width:100%;">⚙️ Settings</button>
             </div>
             <div id="stg-panel" style="display:none;padding:12px;background:#f8fafc;border-bottom:1px solid #ddd;">
                 <div class="set-row"><strong>GAS URL:</strong> <input id="in-url" style="flex:1;"/></div>
-                <div class="set-row">
-                   <strong>ST:</strong> <input id="in-state" style="width:30px;"/>
-                   <strong>ZIP:</strong> <input id="in-zip" style="width:50px;"/>
-                   <strong>CPP:</strong> <input id="in-val" style="width:40px;"/>
-                </div>
-                <div class="set-row">
-                   <input type="checkbox" id="in-miles-dis"/> <label for="in-miles-dis"><strong>Disable Miles Module</strong></label>
-                </div>
+                <div class="set-row"><strong>State:</strong> <input id="in-state" style="width:30px;"/> <strong>Zip:</strong> <input id="in-zip" style="width:50px;"/> <strong>CPP:</strong> <input id="in-val" style="width:40px;"/></div>
+                <div class="set-row"><input type="checkbox" id="in-miles-dis"/> <label for="in-miles-dis"><strong>Disable Miles Module</strong></label></div>
                 <button id="save-btn" class="btn-all" style="padding:6px 10px; width:100%; background:#004d73; margin-top:5px;">Save Settings</button>
             </div>
             <div class="c">
-                <div style="display:flex;gap:10px;margin-bottom:10px;">
-                    <input id="search-in" placeholder="Filter..." style="flex:1;padding:6px;border-radius:4px;border:1px solid #ddd;"/>
-                    <select id="f-src" style="padding:6px;border-radius:4px;border:1px solid #ddd;"><option value="all">All</option><option value="miles">Miles</option><option value="email">Email</option><option value="web">Web</option></select>
-                </div>
-                <div style="overflow-y:auto; flex:1;">
-                    <table><thead><tr><th id="th-name" style="width:180px">Merchant<span> ⇅</span></th><th id="th-reward" style="width:120px">Best Reward<span> ⇅</span></th><th style="width:80px">Action</th><th>Notes</th></tr></thead><tbody id="tbody"></tbody></table>
-                </div>
+                <div style="display:flex;gap:10px;margin-bottom:10px;"><input id="search-in" placeholder="Filter..." style="flex:1;padding:6px;border-radius:4px;border:1px solid #ddd;"/><select id="f-src" style="padding:6px;border-radius:4px;border:1px solid #ddd;"><option value="all">All</option><option value="miles">Miles</option><option value="email">Email</option><option value="web">Web</option></select></div>
+                <div style="overflow-y:auto; flex:1;"><table><thead><tr><th id="th-name" style="width:180px">Merchant<span> ⇅</span></th><th id="th-reward" style="width:120px">Best Reward<span> ⇅</span></th><th style="width:80px">Action</th><th>Notes</th></tr></thead><tbody id="tbody"></tbody></table></div>
             </div>
         </div>
     `;
 
-    // 🚀 拖拽
+    // 拖拽
     let isDragging = false, startX, startY, initialLeft, initialTop;
     const dragHandle = shadow.getElementById('drag-handle');
     dragHandle.onmousedown = (e) => {
@@ -343,8 +346,7 @@
         document.onmouseup = () => { isDragging = false; document.onmousemove = null; document.onmouseup = null; };
     };
 
-    // 事件
-    dragHandle.onclick = (e) => { if (e.target === dragHandle || e.target.tagName === 'SPAN') toggleExpand(); };
+    dragHandle.onclick = (e) => { if (e.target === dragHandle || (e.target.tagName === 'SPAN' && e.target.id !== 'btn-toggle')) toggleExpand(); };
     shadow.getElementById('btn-toggle').onclick = (e) => { e.stopPropagation(); toggleExpand(); };
     shadow.getElementById('btn-all').onclick = (e) => { e.stopPropagation(); toggleExpand(true); fetchWeb(); fetchEmail(); if(!getConfig().milesDisabled) fetchMilesDirect(); };
     shadow.getElementById('btn-web').onclick = (e) => { e.stopPropagation(); toggleExpand(true); fetchWeb(); };
@@ -364,7 +366,13 @@
     shadow.getElementById('f-src').onchange = refreshDisplay;
 
     shadow.getElementById('tbody').onclick = e => {
-        if (e.target.classList.contains('act')) window.open(e.target.dataset.h, '_blank');
+        if (e.target.classList.contains('act')) {
+            let targetUrl = e.target.dataset.h;
+            if (!targetUrl.startsWith('http')) {
+                targetUrl = "https://capitaloneshopping.com" + (targetUrl.startsWith('/') ? '' : '/') + targetUrl;
+            }
+            window.open(targetUrl.replace('__WBCLICKID__', generateUUID()), '_blank');
+        }
         if (e.target.classList.contains('tgl')) {
             const tid = e.target.dataset.t;
             const rows = shadow.querySelectorAll('.' + tid);
@@ -380,6 +388,5 @@
     shadow.getElementById('in-zip').value = initConf.zip;
     shadow.getElementById('in-val').value = initConf.val;
     shadow.getElementById('in-miles-dis').checked = initConf.milesDisabled;
-    refreshDisplay(); // 初始化显示逻辑
-
+    refreshDisplay();
 })();

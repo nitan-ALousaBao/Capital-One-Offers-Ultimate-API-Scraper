@@ -1,109 +1,72 @@
 function doGet(e) {
-  // 1. 初始化配置与日志
-  const query = 'from:hello@capitaloneshopping.com newer_than:4d';
-  const threads = GmailApp.search(query, 0, 40);
+  // 1. 性能策略：只处理最近3天，每会话仅取最新邮件
+  const threads = GmailApp.search('from:hello@capitaloneshopping.com newer_than:3d', 0, 15);
   let rawOffers = [];
-  let stats = { todayTop: 0, listOffers: 0, textOffers: 0 };
+  
+  const cleanMerchant = (s) => {
+    if (!s) return "";
+    // 基础清洗：去标签、去转义
+    let t = s.replace(/<[^>]+>/g, '')
+             .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+    // 逻辑截断：处理 Viator, a Tripadvisor company 这种冗余
+    return t.split(/,| a | logo|\.com|™|®| Shopping/i)[0].trim();
+  };
 
-  const now = new Date();
-  const currentYear = now.getFullYear();
-
-  // 🛠️ 工具函数：清洗文本，去除 HTML 标签和多余空格
-  function cleanText(str) {
-    if (!str) return "";
-    return str.replace(/<[^>]+>/g, '').replace(/&[^;]+;/g, ' ').replace(/\s+/g, ' ').trim();
-  }
-
-  // 🛠️ 工具函数：解析日期并判断是否过期
-  function getExpInfo(content, msgDate) {
-    const dateMatch = content.match(/(?:Expiring|ends on)\s+([a-zA-Z]{3,}\s+\d{1,2}(?:,\s*\d{4})?)/i);
-    if (dateMatch) {
-      let dateStr = dateMatch[1];
-      if (!dateStr.match(/\d{4}/)) dateStr += ", " + currentYear;
-      let expDate = new Date(dateStr);
-      expDate.setHours(23, 59, 59, 999);
-      return { expired: now > expDate, text: `Exp: ${dateMatch[1]}` };
-    }
-    // 如果是 Today's Top 且邮件不是今天的，判定过期
-    const isTodayType = /Today's Top Offers/i.test(content);
-    if (isTodayType) {
-      const isToday = msgDate.toDateString() === now.toDateString();
-      return { expired: !isToday, text: "⚡ Today's Top" };
-    }
-    return { expired: false, text: "Email Offer" };
-  }
-
-  // 2. 遍历邮件会话
   threads.forEach(thread => {
     const messages = thread.getMessages();
-    messages.forEach(msg => {
-      const htmlBody = msg.getBody();
-      const msgDate = msg.getDate();
+    if (messages.length === 0) return;
+    const msg = messages.pop(); 
+    const body = msg.getBody();
 
-      // 提取本邮件内所有链接及其位置，用于“就近匹配”
-      const links = [];
-      const linkRegex = /href="(https:\/\/capitaloneshopping\.com\/(?:api\/v1\/wrapped-link|track\/email|api\/v1\/redirectV2)[^"]+)"/gi;
-      let lM;
-      while ((lM = linkRegex.exec(htmlBody)) !== null) { 
-        links.push({ url: lM[1], index: lM.index }); 
-      }
-      if (links.length === 0) return;
+    // 2. 预提链接池
+    const links = [];
+    const linkRegex = /href="(https:\/\/capitaloneshopping\.com\/(?:api\/v1\/wrapped-link|track\/email|api\/v1\/redirectV2)[^"]+)"/gi;
+    let lM;
+    while ((lM = linkRegex.exec(body)) !== null) { 
+      links.push({ url: lM[1].replace(/&amp;/g, '&'), index: lM.index }); 
+    }
+    if (links.length === 0) return;
 
-      const getLink = (idx, offset = 0) => {
-        let closest = links[0].url, minDiff = 8000;
+    // 3. 多模态高精度匹配
+    const masterParsers = [
+      // 模式 A: Viator 穿透型 (奖励 ... at ... 商户)
+      { reg: /([\d.]+(?:%|\$)\s*(?:back|Rewards|Reward|in Rewards))[\s\S]{1,180}?at\s+([^<.,\n\r]{2,45})/gi, rIdx: 1, mIdx: 2 },
+      // 模式 B: 列表型 (商户名 ... 绿色奖励)
+      { reg: />([^<>{}:;|_#.\[\]]{2,45})<[\s\S]{0,900}?(?:color:\s*(?:green|#058205|#047857)[^>]*>)([\d.]+(?:%|\$)\s*(?:back|Rewards|Reward|off))/gi, mIdx: 1, rIdx: 2 },
+      // 模式 C: 属性型 (图片 alt 属性)
+      { reg: /alt="([^"]{2,45} logo)"[\s\S]{0,1200}?(?:>|\s)([\d.]+(?:%|\$)\s*(?:back|Rewards|Reward))/gi, mIdx: 1, rIdx: 2 }
+    ];
+
+    masterParsers.forEach(p => {
+      let match;
+      while ((match = p.reg.exec(body)) !== null) {
+        let merchant = cleanMerchant(match[p.mIdx]);
+        let reward = match[p.rIdx].replace(/<[^>]+>/g, '').trim();
+
+        // 🚀 核心改进：彻底过滤 New/Existing Customer 干扰
+        const blackList = [
+          'Exclusions', 'terms', 'privacy', 'Your', 'Limited', 'Existing', 
+          'viewed', 'browser', 'Help', 'column', 'react', 'css-', 'font-', 
+          'color:', '700;', 'width', 'Customer', 'Customers', 'Order', 
+          'Offer', 'Activated', 'Deals', 'Account', 'Member'
+        ];
+        
+        const isJunk = blackList.some(b => merchant.toLowerCase().includes(b.toLowerCase()));
+        if (isJunk || merchant.length < 2 || /^[.#\s\d]/.test(merchant)) continue;
+
+        // 就近匹配链接
+        let closest = links[0].url, minDiff = 25000;
         for (let l of links) {
-          let diff = Math.abs(l.index - (offset + idx));
+          let diff = Math.abs(l.index - match.index);
           if (diff < minDiff) { minDiff = diff; closest = l.url; }
         }
-        return closest;
-      };
 
-      // --- 模块 A: Today's Top Offers (分段解析) ---
-      if (/Today's Top Offers/i.test(htmlBody)) {
-        const todayPart = htmlBody.split(/Today's Top Offers/i)[1]?.split(/Other offers/i)[0];
-        if (todayPart) {
-          const tIdx = htmlBody.indexOf(todayPart);
-          const tRegex = /Get\s+([\d.]+(?:%|\$)\s+back)\s+at\s+([^<|\n|\r]+)/gi;
-          let m;
-          while ((m = tRegex.exec(todayPart)) !== null) {
-            let merchant = cleanText(m[2]).split(/Up to/i)[0].replace(/[.!]+$/, '').trim();
-            let timeInfo = getExpInfo("Today's Top Offers", msgDate);
-            if (!timeInfo.expired && merchant.length > 2 && merchant.length < 30) {
-              rawOffers.push({ merchant, reward: cleanText(m[1]) + " 💌", link: getLink(m.index, tIdx), exclusions: timeInfo.text });
-              stats.todayTop++;
-            }
-          }
-        }
-      }
-
-      // --- 模块 B: Other Offers (常规列表解析) ---
-      const otherPart = htmlBody.split(/Other offers/i)[1] || htmlBody;
-      const oIdx = htmlBody.indexOf(otherPart);
-      const timeInfo = getExpInfo(otherPart, msgDate);
-
-      if (!timeInfo.expired) {
-        // 1. 匹配 24px 网格
-        const listRegex = /<td[^>]*font-size:\s*24px[^>]*>([\s\S]*?)<\/td>[\s\S]{0,2000}?<span[^>]*color:\s*green[^>]*>([\s\S]*?)<\/span>/gi;
-        let lm;
-        while ((lm = listRegex.exec(otherPart)) !== null) {
-          let merchant = cleanText(lm[1]).replace(/[.!]+$/, '').trim();
-          if (merchant.length > 2 && merchant.length < 30) {
-            rawOffers.push({ merchant, reward: cleanText(lm[2]) + " 💌", link: getLink(lm.index, oIdx), exclusions: timeInfo.text });
-            stats.listOffers++;
-          }
-        }
-        // 2. 匹配 文本格式 (topresume.com 30% Back)
-        const txtRegex = /([a-z0-9.-]+\.[a-z]{2,})\s*(\d+%\s*Back)/gi;
-        let tm;
-        while ((tm = txtRegex.exec(otherPart)) !== null) {
-          rawOffers.push({ merchant: tm[1], reward: tm[2] + " 💌", link: getLink(tm.index, oIdx), exclusions: timeInfo.text });
-          stats.textOffers++;
-        }
+        rawOffers.push({ merchant, reward: reward + " 💌", link: closest, exclusions: "Email Offer" });
       }
     });
   });
 
-  // 3. 全局去重
+  // 4. 全局去重并 Log
   let unique = [];
   let seen = new Set();
   rawOffers.forEach(o => {
@@ -111,9 +74,8 @@ function doGet(e) {
     if (!seen.has(key)) { seen.add(key); unique.push(o); }
   });
 
-  // 4. 控制台日志输出
-  console.log(`[C1 Scraper Log] 探测结束。今日置顶: ${stats.todayTop}, 常规列表: ${stats.listOffers}, 文本列表: ${stats.textOffers}`);
-  console.log(`去重后最终吐出: ${unique.length} 条有效数据。`);
+  console.log(`[C1 Final V7] 抓取完成: ${unique.length} 条。`);
+  unique.forEach((u, i) => console.log(`${i+1}. ${u.merchant} -> ${u.reward}`));
 
   return ContentService.createTextOutput(JSON.stringify({ items: unique })).setMimeType(ContentService.MimeType.JSON);
 }

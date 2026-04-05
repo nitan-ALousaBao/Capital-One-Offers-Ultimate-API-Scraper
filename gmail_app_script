@@ -9,35 +9,26 @@ function doGet(e) {
 
   const cleanMerchant = (s) => {
     if (!s) return "";
-    // 解码 HTML 实体
     let t = s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
     t = t.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 
-    // 🚀 修复 1: 判定是否为促销文案 (Macy's 20-60% Off 案例)
     const lowerT = t.toLowerCase();
     if (/\d+/.test(t) && (lowerT.includes("off") || lowerT.includes("back") || lowerT.includes("%") || lowerT.includes("rewards"))) return "";
-
-    // 🚀 修复 2: 长度与无空格检查 (针对中文 Vlog 相机长描述)
     if (t.split(' ').length > 4 || (!t.includes(' ') && t.length > 20)) return "";
-
-    // 🚀 修复 3: 处理 "描述 - 商户" 结构 (针对 Temu)
     if (t.includes(" - ")) {
       let parts = t.split(" - ");
       t = parts[parts.length - 1].trim(); 
     }
 
-    // 4. 身份过滤
     const forbidden = ["capital one", "shopping", "reward", "limited", "existing", "customer", "member", "elite", "stay", "consumed", "save up to", "real-time", "easter sale"];
     if (forbidden.some(f => t.toLowerCase().includes(f))) return "";
 
-    // 5. 截断过滤
     const blockers = [",", "，", " – ", " — ", " logo", " for you", "!", ":", ".com", "™", "®"];
     let result = t;
     for (let b of blockers) {
       const idx = result.indexOf(b);
       if (idx !== -1) result = result.substring(0, idx);
     }
-    
     return result.replace(/^(at |to |on |for )/i, '').replace(/[.!?, ]+$/, '').trim();
   };
 
@@ -49,15 +40,58 @@ function doGet(e) {
       const body = msg.getBody();
       const cleanBody = body.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<script[\s\S]*?<\/script>/gi, '');
       
-      // 1. 深度网格扫描 (收割底边)
+      // 🚀 1. 预收集邮件内所有合法链接及其坐标
+      const allLinks = [];
+      const linkRegex = /href="(https:\/\/capitaloneshopping\.com\/(?:api\/v1\/wrapped-link|track\/email|api\/v1\/redirectV2)[^"]+)"/gi;
+      let linkMatch;
+      while ((linkMatch = linkRegex.exec(body)) !== null) {
+        allLinks.push({ url: linkMatch[1].replace(/&amp;/g, '&'), pos: linkMatch.index });
+      }
+
+      // 辅助函数：寻找离特定字符位置最近的链接
+      const getClosestLink = (targetPos) => {
+        if (allLinks.length === 0) return "";
+        let closest = allLinks[0].url;
+        let minDiff = Math.abs(allLinks[0].pos - targetPos);
+        for (let l of allLinks) {
+          let diff = Math.abs(l.pos - targetPos);
+          if (diff < minDiff) {
+            minDiff = diff;
+            closest = l.url;
+          }
+        }
+        return closest;
+      };
+
+      // 🚀 2. 深度网格扫描 (收割多商户链接)
       const gridRegex = /class="css-14qmkao"[^>]*>([^<]+)<\/td>[\s\S]{0,1200}?(?:color:\s*(?:green|#058205|#047857|#427E27)[^>]*>)\s*((?:up\s+to\s+)?[\d.]+(?:%|\$|X)\s*(?:back|Rewards|Reward|off|in\s+Rewards))/gi;
       let gM;
       while ((gM = gridRegex.exec(body)) !== null) {
         let mName = cleanMerchant(gM[1]);
-        if (mName) rawOffers.push({ merchant: mName, reward: gM[2].trim() + " 💌" });
+        if (mName) {
+          rawOffers.push({ 
+            merchant: mName, 
+            reward: gM[2].trim() + " 💌", 
+            link: getClosestLink(gM.index) 
+          });
+        }
       }
 
-      // 2. 提取邮件主品牌 (Logo)
+      // 🚀 3. 自含句式识别 (解决 American Eagle 等链接)
+      const selfContainedRegex = /(?:Get|Earn|up to)(?:<[^>]+>|\s)+((?:up\s+to\s+)?[\d.]+(?:%|\$|X)\s*(?:back|Rewards|Reward|off))(?:<[^>]+>|\s)+(?:at|on|for)(?:<[^>]+>|\s)+([^<:!]{2,40})/gi;
+      let sM;
+      while ((sM = selfContainedRegex.exec(body)) !== null) {
+        let mName = cleanMerchant(sM[2]);
+        if (mName) {
+          rawOffers.push({ 
+            merchant: mName, 
+            reward: sM[1].trim() + " 💌", 
+            link: getClosestLink(sM.index)
+          });
+        }
+      }
+
+      // 🚀 4. 大额 Cash Offer (Hero 区域)
       const logoMatches = body.matchAll(/alt="([^"]+)\s+logo"/gi);
       let primaryBrand = "";
       for (const lm of logoMatches) {
@@ -65,21 +99,25 @@ function doGet(e) {
         if (name) { primaryBrand = name; break; }
       }
 
-      // 3. 自含句式识别 (穿透 HTML 标签)
-      const selfContainedRegex = /(?:Get|Earn|up to)(?:<[^>]+>|\s)+((?:up\s+to\s+)?[\d.]+(?:%|\$|X)\s*(?:back|Rewards|Reward|off))(?:<[^>]+>|\s)+(?:at|on|for)(?:<[^>]+>|\s)+([^<:!]{2,40})/gi;
-      let sM;
-      while ((sM = selfContainedRegex.exec(body)) !== null) {
-        let mName = cleanMerchant(sM[2]);
-        if (mName) rawOffers.push({ merchant: mName, reward: sM[1].trim() + " 💌" });
-      }
-
-      // 4. 大额 Cash Offer & T-Mobile
       const cashOfferRegex = /\$([\d,]+)\s+when\s+you\s+spend\s+\$([\d,]+)\+?/i;
       let cM = body.match(cashOfferRegex);
-      if (cM && primaryBrand) rawOffers.push({ merchant: primaryBrand, reward: `$${cM[1]} when you spend $${cM[2]}+ 💌` });
+      if (cM && primaryBrand) {
+        rawOffers.push({ 
+          merchant: primaryBrand, 
+          reward: `$${cM[1]} when you spend $${cM[2]}+ 💌`,
+          link: getClosestLink(cM.index)
+        });
+      }
 
+      // 🚀 5. T-Mobile 标题特供
       const subR = subject.match(/\$([\d,]+)(?=\s+Reward)/);
-      if (subR && primaryBrand) rawOffers.push({ merchant: primaryBrand, reward: `$${subR[1]} 💌` });
+      if (subR && primaryBrand) {
+         rawOffers.push({ 
+           merchant: primaryBrand, 
+           reward: `$${subR[1]} 💌`,
+           link: getClosestLink(0) // 标题 Offer 通常关联第一个链接
+         });
+      }
     });
   });
 
@@ -90,11 +128,10 @@ function doGet(e) {
     if (!seen.has(key)) { seen.add(key); unique.push(o); }
   });
 
-  console.log(`--- [C1 V41.0 ALousaBao Smart-Filter] ---`);
+  console.log(`--- [C1 V42.0 Contextual-Link Output] ---`);
   unique.sort((a,b) => a.merchant.localeCompare(b.merchant)).forEach((u, i) => {
     console.log(`[${i+1}] ${u.merchant} -> ${u.reward}`);
   });
   
-  console.log(`\n🎉 Total unique: ${unique.length}. Vlog descriptions and Easter sales filtered.`);
   return ContentService.createTextOutput(JSON.stringify({ items: unique })).setMimeType(ContentService.MimeType.JSON);
 }

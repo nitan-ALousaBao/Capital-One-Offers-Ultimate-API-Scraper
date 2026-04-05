@@ -6,6 +6,7 @@ function doGet(e) {
   const now = new Date();
   const currentYear = now.getFullYear();
 
+  // 76 9th Ave, New York, NY 10011 (Google NYC) context if needed for testing
   function getExpInfo(content, msgDate) {
     const dateMatch = content.match(/(?:Expiring|ends on|through)\s+([a-zA-Z]{3,}\s+\d{1,2}(?:,\s*\d{4})?)/i);
     if (dateMatch) {
@@ -26,10 +27,10 @@ function doGet(e) {
     if (!s) return "";
     let t = s.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
     
-    // 🚀 重新接回全量阻断词，彻底切除 Marriott/Hilton 等后缀
+    // 🚀 阻断词列表：切除各种常见的描述性后缀
     const blockers = [
-      ",", " logo", ".com", "™", "®", " Shopping", ":", "!", " - ", " – ",
-      " Member", " Customer", " Stay", " Up to", " Get up", " You last", " Shop now"
+      ",", "，", " - ", " – ", " — ", " logo", ".com", "™", "®", " Shopping", ":", "!", 
+      " Member", " Customer", " Stay", " Up to", " Get up", " You last", " Shop now", " Consumed"
     ];
     
     let result = t;
@@ -37,7 +38,9 @@ function doGet(e) {
       const idx = result.toLowerCase().indexOf(b.toLowerCase());
       if (idx !== -1) result = result.substring(0, idx);
     }
-    return result.replace(/^(at |to |on |for )/i, '').trim();
+    
+    // 🚀 物理剔除末尾的所有标点符号
+    return result.replace(/^(at |to |on |for )/i, '').replace(/[.!?, ]+$/, '').trim();
   };
 
   threads.forEach(thread => {
@@ -51,9 +54,7 @@ function doGet(e) {
       const timeInfo = getExpInfo(body, msgDate);
       if (timeInfo.expired) return; 
 
-      // 预处理体速
       const cleanBody = body.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<script[\s\S]*?<\/script>/gi, '');
-
       const links = [];
       const linkRegex = /href="(https:\/\/capitaloneshopping\.com\/(?:api\/v1\/wrapped-link|track\/email|api\/v1\/redirectV2)[^"]+)"/gi;
       let lM;
@@ -72,11 +73,15 @@ function doGet(e) {
       };
 
       const parsers = [
-        // A. Hero / Subject 专项 (解决 LEGO/T-Mobile 这种置顶)
+        // A. Hero 逻辑优化：严防产品描述误抓
         { reg: /(?:Coupon Found at|Exclusive offer at|Your\s+(\$[\d,]+)\s+Reward\s+at)\s+([^:!]{2,50})/gi, mIdx: 2, rIdx: 1, isHero: true },
-        // B. 句式穿透 (支持百分比和满减)
-        { reg: /(?:Get|Earn|up to)\s+([\d.]+(?:%|\$)\s*(?:back|Rewards|Reward|in Rewards|off)|Get\s+\$[\d,]+\s+when\s+you\s+spend\s+\$[\d,]+\+?)(?:<[^>]+>|\s)*at(?:<[^>]+>|\s)*([a-zA-Z0-9\s&'.-]{2,50})/gi, rIdx: 1, mIdx: 2 },
-        // C. 列表穿透 (支持含 & ' 等字符的商户名)
+        // 专门处理 Temu/Viator 的 Activate 结构：如果有横杠则提取商户，否则跳过
+        { reg: /Activate Rewards on items like\s+[\s\S]+?\s*-\s*([^!]{2,30})/gi, mIdx: 1, isHero: true },
+        
+        // B. 句式穿透
+        { reg: /(?:Get|Earn|up to)\s+([\d.]+(?:%|\$)\s*(?:back|Rewards|Reward|in Rewards|off)|Get\s+\$[\d,]+\s+when\s+you\s+spend\s+\$[\d,]+\+?)[^<]{0,100}?(?:at|on|for)\s+([a-zA-Z0-9\s&'.-]{2,50})/gi, rIdx: 1, mIdx: 2 },
+        
+        // C. 列表穿透 (增加对具体房型的过滤)
         { reg: />([a-zA-Z0-9\s&'.-]{2,50})<[\s\S]{0,1000}?(?:color:\s*(?:green|#058205|#047857)[^>]*>)([\d.]+(?:%|\$)\s*(?:back|Rewards|Reward|off))/gi, mIdx: 1, rIdx: 2 }
       ];
 
@@ -84,7 +89,12 @@ function doGet(e) {
         if (p.isHero) {
           const hMatch = p.reg.exec(subject);
           if (hMatch) {
-            const hMerchant = cleanMerchant(hMatch[p.mIdx]);
+            let hMerchant = cleanMerchant(hMatch[p.mIdx]);
+            // 如果误抓了长句子，则去正文补救
+            if (hMerchant.split(' ').length > 4) {
+               const rescue = cleanBody.match(/(?:at|on|for)\s+([A-Z][a-zA-Z0-9\s&'.-]{2,25})/);
+               if (rescue) hMerchant = cleanMerchant(rescue[1]);
+            }
             let bestReward = (p.rIdx && hMatch[p.rIdx]) ? hMatch[p.rIdx] : "";
             if (!bestReward) {
               const rInBody = cleanBody.match(/(?:\$[\d,]+\s+when\s+you\s+spend\s+\$[\d,]+\+?|[\d.]+(?:%|\$)\s*(?:back|Rewards|Reward|off))/i);
@@ -98,8 +108,8 @@ function doGet(e) {
             let merchant = cleanMerchant(match[p.mIdx]);
             let reward = match[p.rIdx].replace(/<[^>]+>/g, '').trim();
 
-            const garbage = ['Exclusions', 'terms', 'privacy', 'Your', 'Limited', 'Existing', 'New', 'Customer', 'viewed', 'browser', 'Help', 'react', 'css-', 'applied', 'Capital', 'Offer', 'Deals', 'Activate', 'Account', 'Member', 'at ', 'to ', 'Get '];
-            if (garbage.some(g => merchant.toLowerCase() === g.toLowerCase().trim()) || merchant.length < 2) continue;
+            const garbage = ['Exclusions', 'terms', 'privacy', 'Your', 'Limited', 'Existing', 'New', 'Customer', 'viewed', 'browser', 'Help', 'react', 'css-', 'applied', 'Capital', 'Offer', 'Deals', 'Activate', 'Account', 'Member', 'at ', 'to ', 'Get ', 'items like', 'hour Snorkel'];
+            if (garbage.some(g => merchant.toLowerCase().includes(g.toLowerCase().trim())) || merchant.length < 2 || merchant.split(' ').length > 5) continue;
 
             rawOffers.push({ merchant: merchant, reward: reward + " 💌", link: getLink(match.index), exclusions: timeInfo.text });
           }
@@ -115,12 +125,12 @@ function doGet(e) {
     if (!seen.has(key)) { seen.add(key); unique.push(o); }
   });
 
-  console.log(`--- [C1 Final V22.0 Output] ---`);
+  console.log(`--- [C1 Final V25.0 Output] ---`);
   unique.sort((a,b) => a.merchant.localeCompare(b.merchant)).forEach((u, i) => {
     console.log(`[${i+1}] ${u.merchant} -> ${u.reward} (${u.exclusions})`);
   });
   
-  console.log(`\n🎉 Total unique email offers captured: ${unique.length}`);
+  console.log(`\n🎉 Total unique (ALousaBao Filtered) offers captured: ${unique.length}`);
 
   return ContentService.createTextOutput(JSON.stringify({ items: unique })).setMimeType(ContentService.MimeType.JSON);
 }

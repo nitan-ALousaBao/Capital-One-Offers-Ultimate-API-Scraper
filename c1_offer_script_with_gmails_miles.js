@@ -1,11 +1,13 @@
 // ==UserScript==
-// @name         Capital One Offers Ultimate (v41.0 Miles-Label)
+// @name         Capital One Offers Ultimate (v45.1 Auto-Update)
 // @namespace    http://tampermonkey.net/
-// @version      41.0
-// @description  移除 Miles 链接改为标签显示，Web 保持 UUID 激活追踪，支持 CPP 换算与左上角拖拽
+// @version      45.1
+// @description  支持 LEGO 满减权重置顶，修正子按钮点击，集成 GitHub 自动更新
 // @author       ALousaBao
 // @match        https://capitaloneshopping.com/*
 // @match        https://capitaloneoffers.com/*
+// @updateURL    https://raw.githubusercontent.com/nitan-ALousaBao/Capital-One-Offers-Ultimate-API-Scraper/refs/heads/main/c1_offer_script_with_gmails_miles.js
+// @downloadURL  https://raw.githubusercontent.com/nitan-ALousaBao/Capital-One-Offers-Ultimate-API-Scraper/refs/heads/main/c1_offer_script_with_gmails_miles.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -27,8 +29,8 @@
 
     const getConfig = () => ({
         url: (GM_getValue('c1_api_url', '')).trim(),
-        state: GM_getValue('c1_state', 'NY'),
-        zip: GM_getValue('c1_zip', '10011'),
+        state: GM_getValue('c1_state', 'NJ'),
+        zip: GM_getValue('c1_zip', '07302'),
         val: parseFloat(GM_getValue('c1_valuation', '1.6')) || 1.6,
         milesDisabled: GM_getValue('c1_miles_disabled', false)
     });
@@ -73,9 +75,6 @@
         refreshDisplay(); updateStatus();
     });
 
-    // ==========================================
-    // 🛰️ Worker 逻辑 (Miles 页面)
-    // ==========================================
     if (window.location.hostname.includes('capitaloneoffers.com')) {
         const token = window.location.pathname.split('/feed/')[1]?.split('?')[0];
         if (token && token.length > 20) GM_setValue('vx_token_bus', token);
@@ -115,20 +114,18 @@
         document.body.appendChild(btn); return;
     }
 
-    // ==========================================
-    // 👑 Master 逻辑
-    // ==========================================
-
     function getWeight(s) {
         if (!s) return { type: 0, val: 0 };
         const conf = getConfig();
         const n = parseFloat(s.replace(/,/g, '').match(/(\d+(\.\d+)?)/)?.[1] || 0);
-        if (s.includes('✈️')) {
-            if (s.toLowerCase().includes('x')) return { type: 2, val: n * conf.val };
-            return { type: 1, val: (n * conf.val) / 100 };
+        if (s.includes('$')) return { type: 3, val: n };
+        if (s.includes('%') || s.includes('✈️')) {
+            let effectiveVal = n;
+            if (s.includes('✈️')) {
+                effectiveVal = s.toLowerCase().includes('x') ? (n * conf.val) : ((n * conf.val) / 100);
+            }
+            return { type: 2, val: effectiveVal };
         }
-        if (s.includes('$')) return { type: 1, val: n };
-        if (s.includes('%')) return { type: 2, val: n };
         return { type: 0, val: n };
     }
 
@@ -190,7 +187,6 @@
             if(best.reward.includes('✈️')) tr.style.borderLeft = '4px solid #0ea5e9';
             if(best.reward.includes('💌')) tr.style.backgroundColor = '#fff7ed';
 
-            // 🚀 核心逻辑：如果是 Miles，不显示按钮，显示文本标签
             const actionCell = (best.source === 'miles')
                 ? `<small style="color:#64748b; font-weight:600;">✈️ Miles Offer</small>`
                 : `<button class="act" data-h="${best.link}">🚀 Go</button>`;
@@ -286,7 +282,6 @@
         });
     }
 
-    // UI 构建 (Shadow DOM)
     const host = document.createElement('div');
     host.style.cssText = 'position: fixed; top: 20px; left: 20px; z-index: 2147483647;';
     document.body.appendChild(host);
@@ -334,7 +329,6 @@
         </div>
     `;
 
-    // 拖拽
     let isDragging = false, startX, startY, initialLeft, initialTop;
     const dragHandle = shadow.getElementById('drag-handle');
     dragHandle.onmousedown = (e) => {
@@ -366,12 +360,15 @@
     shadow.getElementById('f-src').onchange = refreshDisplay;
 
     shadow.getElementById('tbody').onclick = e => {
-        if (e.target.classList.contains('act')) {
-            let targetUrl = e.target.dataset.h;
-            if (!targetUrl.startsWith('http')) {
-                targetUrl = "https://capitaloneshopping.com" + (targetUrl.startsWith('/') ? '' : '/') + targetUrl;
+        const actBtn = e.target.closest('.act');
+        if (actBtn) {
+            let targetUrl = actBtn.dataset.h;
+            if (targetUrl) {
+                if (!targetUrl.startsWith('http')) {
+                    targetUrl = "https://capitaloneshopping.com" + (targetUrl.startsWith('/') ? '' : '/') + targetUrl;
+                }
+                window.open(targetUrl.replace('__WBCLICKID__', generateUUID()), '_blank');
             }
-            window.open(targetUrl.replace('__WBCLICKID__', generateUUID()), '_blank');
         }
         if (e.target.classList.contains('tgl')) {
             const tid = e.target.dataset.t;

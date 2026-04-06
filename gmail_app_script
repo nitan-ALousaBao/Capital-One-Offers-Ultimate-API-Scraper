@@ -2,11 +2,33 @@ function doGet(e) {
   const query = 'from:hello@capitaloneshopping.com newer_than:5d';
   const threads = GmailApp.search(query, 0, 45); 
   
-  console.log(`[Audit] Search initiated. Found ${threads.length} active threads.`);
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  console.log(`[Audit] Search initiated. Found ${threads.length} active threads. Current Time: ${now.toLocaleString()}`);
   
   let rawOffers = [];
-  const now = new Date();
 
+  // 🚀 恢复：深度日期/过期判定引擎
+  function getExpInfo(content, msgDate) {
+    const dateMatch = content.match(/(?:Expiring|ends on|through|expires)\s+([a-zA-Z]{3,}\s+\d{1,2}(?:,\s*\d{4})?)/i);
+    if (dateMatch) {
+      let dateStr = dateMatch[1];
+      if (!dateStr.match(/\d{4}/)) dateStr += ", " + currentYear;
+      let expDate = new Date(dateStr);
+      expDate.setHours(23, 59, 59, 999);
+      if (now > expDate) return { expired: true, text: "Expired" };
+      return { expired: false, text: `Exp: ${dateMatch[1]}` };
+    }
+    // 判定 Today Only (针对 American Eagle 等)
+    if (/TODAY ONLY/i.test(content)) {
+      const isToday = msgDate.toDateString() === now.toDateString();
+      if (!isToday) return { expired: true, text: "Expired (Today Only)" };
+      return { expired: false, text: "⚡ Today Only" };
+    }
+    return { expired: false, text: "Email Offer" };
+  }
+
+  // 🚀 锁定：V41 版本的商户名洁癖过滤
   const cleanMerchant = (s) => {
     if (!s) return "";
     let t = s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
@@ -38,9 +60,15 @@ function doGet(e) {
     
     messages.forEach(msg => {
       const body = msg.getBody();
+      const msgDate = msg.getDate();
+      
+      // 🚀 执行过滤
+      const timeInfo = getExpInfo(body, msgDate);
+      if (timeInfo.expired) return; // 跳过过期邮件
+
       const cleanBody = body.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<script[\s\S]*?<\/script>/gi, '');
       
-      // 🚀 1. 预收集邮件内所有合法链接及其坐标
+      // 🚀 锁定：V42 的坐标系链接追踪
       const allLinks = [];
       const linkRegex = /href="(https:\/\/capitaloneshopping\.com\/(?:api\/v1\/wrapped-link|track\/email|api\/v1\/redirectV2)[^"]+)"/gi;
       let linkMatch;
@@ -48,50 +76,38 @@ function doGet(e) {
         allLinks.push({ url: linkMatch[1].replace(/&amp;/g, '&'), pos: linkMatch.index });
       }
 
-      // 辅助函数：寻找离特定字符位置最近的链接
       const getClosestLink = (targetPos) => {
         if (allLinks.length === 0) return "";
         let closest = allLinks[0].url;
         let minDiff = Math.abs(allLinks[0].pos - targetPos);
         for (let l of allLinks) {
           let diff = Math.abs(l.pos - targetPos);
-          if (diff < minDiff) {
-            minDiff = diff;
-            closest = l.url;
-          }
+          if (diff < minDiff) { minDiff = diff; closest = l.url; }
         }
         return closest;
       };
 
-      // 🚀 2. 深度网格扫描 (收割多商户链接)
+      // 1. 网格扫描
       const gridRegex = /class="css-14qmkao"[^>]*>([^<]+)<\/td>[\s\S]{0,1200}?(?:color:\s*(?:green|#058205|#047857|#427E27)[^>]*>)\s*((?:up\s+to\s+)?[\d.]+(?:%|\$|X)\s*(?:back|Rewards|Reward|off|in\s+Rewards))/gi;
       let gM;
       while ((gM = gridRegex.exec(body)) !== null) {
         let mName = cleanMerchant(gM[1]);
         if (mName) {
-          rawOffers.push({ 
-            merchant: mName, 
-            reward: gM[2].trim() + " 💌", 
-            link: getClosestLink(gM.index) 
-          });
+          rawOffers.push({ merchant: mName, reward: gM[2].trim() + " 💌", link: getClosestLink(gM.index), exclusions: timeInfo.text });
         }
       }
 
-      // 🚀 3. 自含句式识别 (解决 American Eagle 等链接)
+      // 2. 自含句式识别 (Today's Top Offers 等)
       const selfContainedRegex = /(?:Get|Earn|up to)(?:<[^>]+>|\s)+((?:up\s+to\s+)?[\d.]+(?:%|\$|X)\s*(?:back|Rewards|Reward|off))(?:<[^>]+>|\s)+(?:at|on|for)(?:<[^>]+>|\s)+([^<:!]{2,40})/gi;
       let sM;
       while ((sM = selfContainedRegex.exec(body)) !== null) {
         let mName = cleanMerchant(sM[2]);
         if (mName) {
-          rawOffers.push({ 
-            merchant: mName, 
-            reward: sM[1].trim() + " 💌", 
-            link: getClosestLink(sM.index)
-          });
+          rawOffers.push({ merchant: mName, reward: sM[1].trim() + " 💌", link: getClosestLink(sM.index), exclusions: timeInfo.text });
         }
       }
 
-      // 🚀 4. 大额 Cash Offer (Hero 区域)
+      // 3. 主品牌 & Cash Offer
       const logoMatches = body.matchAll(/alt="([^"]+)\s+logo"/gi);
       let primaryBrand = "";
       for (const lm of logoMatches) {
@@ -102,21 +118,12 @@ function doGet(e) {
       const cashOfferRegex = /\$([\d,]+)\s+when\s+you\s+spend\s+\$([\d,]+)\+?/i;
       let cM = body.match(cashOfferRegex);
       if (cM && primaryBrand) {
-        rawOffers.push({ 
-          merchant: primaryBrand, 
-          reward: `$${cM[1]} when you spend $${cM[2]}+ 💌`,
-          link: getClosestLink(cM.index)
-        });
+        rawOffers.push({ merchant: primaryBrand, reward: `$${cM[1]} when you spend $${cM[2]}+ 💌`, link: getClosestLink(cM.index), exclusions: timeInfo.text });
       }
 
-      // 🚀 5. T-Mobile 标题特供
       const subR = subject.match(/\$([\d,]+)(?=\s+Reward)/);
       if (subR && primaryBrand) {
-         rawOffers.push({ 
-           merchant: primaryBrand, 
-           reward: `$${subR[1]} 💌`,
-           link: getClosestLink(0) // 标题 Offer 通常关联第一个链接
-         });
+         rawOffers.push({ merchant: primaryBrand, reward: `$${subR[1]} 💌`, link: getClosestLink(0), exclusions: timeInfo.text });
       }
     });
   });
@@ -128,9 +135,9 @@ function doGet(e) {
     if (!seen.has(key)) { seen.add(key); unique.push(o); }
   });
 
-  console.log(`--- [C1 V42.0 Contextual-Link Output] ---`);
+  console.log(`--- [C1 V43.0 Logic-Complete Output] ---`);
   unique.sort((a,b) => a.merchant.localeCompare(b.merchant)).forEach((u, i) => {
-    console.log(`[${i+1}] ${u.merchant} -> ${u.reward}`);
+    console.log(`[${i+1}] ${u.merchant} -> ${u.reward} (${u.exclusions})`);
   });
   
   return ContentService.createTextOutput(JSON.stringify({ items: unique })).setMimeType(ContentService.MimeType.JSON);

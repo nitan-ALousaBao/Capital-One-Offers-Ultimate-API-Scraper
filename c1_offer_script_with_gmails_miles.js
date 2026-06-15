@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Capital One Offers Ultimate (v46.0 Final)
+// @name         Capital One Offers Ultimate (v47.6)
 // @namespace    http://tampermonkey.net/
-// @version      47.5
+// @version      47.6
 // @description  完整版：脱离 Body 独立挂载，静默重生，告别 React 冲突
 // @author       ALousaBao
 // @match        https://capitaloneshopping.com/*
@@ -30,6 +30,8 @@
     let uiHostElement = null;
     let webDomMergeObserver = null;
     let webDomMergeTimer = null;
+    let domOfferActionSeq = 0;
+    const domOfferActionMap = new Map();
 
     const getConfig = () => ({
         url: (GM_getValue('c1_api_url', '')).trim(),
@@ -171,20 +173,44 @@
                 || '').replace(/\s+/g, ' ').trim();
             if (!merchant) return;
             const key = normalizeMerchantName(merchant);
-            if (!queues[key]) queues[key] = { merchant, rewards: [] };
-            if (!queues[key].rewards.includes(reward)) queues[key].rewards.push(reward);
+            const action = extractDomOfferAction(card);
+            if (!queues[key]) queues[key] = { merchant, offers: [] };
+            if (!queues[key].offers.some(offer => offer.reward === reward && offer.link === action.link && offer.actionId === action.actionId)) {
+                queues[key].offers.push({ reward, link: action.link, actionId: action.actionId });
+            }
         });
         return queues;
+    }
+
+    function extractDomOfferAction(card) {
+        const link = Array.from(card.querySelectorAll('a[href]'))
+            .find(el => /get this offer|go|shop|view/i.test(el.textContent || '') || el.href);
+        if (link?.href) return { link: link.href, actionId: '' };
+
+        const button = Array.from(card.querySelectorAll('button, [role="button"]'))
+            .find(el => /get this offer|go|shop|view/i.test(el.textContent || ''));
+        const target = button || card;
+        const attrLink = target?.getAttribute?.('href')
+            || target?.getAttribute?.('data-href')
+            || target?.getAttribute?.('data-url')
+            || target?.dataset?.href
+            || target?.dataset?.url
+            || '';
+        if (attrLink) return { link: attrLink, actionId: '' };
+
+        const actionId = `dom-${++domOfferActionSeq}`;
+        domOfferActionMap.set(actionId, target);
+        return { link: '', actionId };
     }
 
     function takeDomSpendBackReward(queues, merchant) {
         const key = normalizeMerchantName(merchant);
         let queue = queues[key];
-        if (!queue || !queue.rewards.length) {
+        if (!queue || !queue.offers.length) {
             const fuzzyKey = Object.keys(queues).find(k => k && key && (k.includes(key) || key.includes(k)));
             queue = fuzzyKey ? queues[fuzzyKey] : null;
         }
-        return queue && queue.rewards.length ? queue.rewards[0] : findPageSpendBackRewardNearMerchant(merchant);
+        return queue && queue.offers.length ? queue.offers[0].reward : findPageSpendBackRewardNearMerchant(merchant);
     }
 
     function findPageSpendBackRewardNearMerchant(merchant) {
@@ -201,11 +227,12 @@
 
     function domSpendBackQueuesToItems(queues) {
         return Object.values(queues).flatMap(queue =>
-            queue.rewards.map(reward => ({
+            queue.offers.map(offer => ({
                 merchant: queue.merchant,
-                reward,
+                reward: offer.reward,
                 exclusions: 'From page offer',
-                link: '',
+                link: offer.link || '',
+                actionId: offer.actionId || '',
                 source: 'web'
             }))
         );
@@ -214,11 +241,11 @@
     function mergeDomSpendBackRewards(queues) {
         let changed = false;
         Object.entries(queues).forEach(([key, queue]) => {
-            queue.rewards.forEach(reward => {
+            queue.offers.forEach(offer => {
                 const exact = currentData.find(item =>
                     item.source === 'web'
                     && normalizeMerchantName(item.merchant) === key
-                    && item.reward === reward
+                    && item.reward === offer.reward
                 );
                 if (exact) return;
 
@@ -228,16 +255,19 @@
                     && !String(item.reward || '').trim()
                 );
                 if (blank) {
-                    blank.reward = reward;
+                    blank.reward = offer.reward;
+                    if (offer.link && !blank.link) blank.link = offer.link;
+                    if (offer.actionId && !blank.actionId) blank.actionId = offer.actionId;
                     changed = true;
                     return;
                 }
 
                 currentData.push({
                     merchant: queue.merchant,
-                    reward,
+                    reward: offer.reward,
                     exclusions: 'From page offer',
-                    link: '',
+                    link: offer.link || '',
+                    actionId: offer.actionId || '',
                     source: 'web'
                 });
                 counts.web++;
@@ -295,7 +325,7 @@
         if (!Array.isArray(newItems)) return 0;
         let added = 0;
         newItems.forEach(item => {
-            const next = { merchant: item.merchant, reward: item.reward, exclusions: item.exclusions, link: item.link, source: type };
+            const next = { merchant: item.merchant, reward: item.reward, exclusions: item.exclusions, link: item.link, actionId: item.actionId || '', source: type };
             const nextKey = normalizeMerchantName(next.merchant);
             const nextReward = String(next.reward || '').trim();
             if (nextReward && currentData.some(existing =>
@@ -355,7 +385,6 @@
         tbody.innerHTML = '';
         arr.forEach((g, idx) => {
             const best = g.items[0];
-            const fallbackLink = g.items.find(i => i.link)?.link || '';
             const gid = `g-${idx}`;
             const tr = document.createElement('tr');
             if(best.reward.includes('✈️')) tr.style.borderLeft = '4px solid #0ea5e9';
@@ -363,7 +392,7 @@
 
             const actionCell = (best.source === 'miles')
                 ? `<small style="color:#64748b; font-weight:600;">✈️ Miles Offer</small>`
-                : `<button type="button" class="act" data-h="${best.link || fallbackLink}">🚀 Go</button>`;
+                : `<button type="button" class="act" data-h="${best.link}" data-dom-action="${best.actionId || ''}">🚀 Go</button>`;
 
             tr.innerHTML = `<td style="width:180px"><strong>${best.merchant}</strong> ${g.items.length > 1 ? `<button type="button" class="tgl" data-t="${gid}">▶ ${g.items.length-1}</button>` : ''}</td><td style="color:#15803d; font-weight:bold; width:120px;">${best.reward}</td><td style="width:80px">${actionCell}</td><td style="color:#64748b; font-size:11px;">${best.exclusions || 'None'}</td>`;
             tbody.appendChild(tr);
@@ -376,7 +405,7 @@
                     ctr.style.backgroundColor = '#f8fafc';
                     const childAction = (c.source === 'miles')
                         ? `<small style="color:#94a3b8;">✈️ Miles</small>`
-                        : `<button type="button" class="act" data-h="${c.link || fallbackLink}">🚀</button>`;
+                        : `<button type="button" class="act" data-h="${c.link}" data-dom-action="${c.actionId || ''}">🚀</button>`;
                     ctr.innerHTML = `<td style="padding-left:25px; color:#475569;">↳ ${c.merchant}</td><td style="color:#475569;">${c.reward}</td><td>${childAction}</td><td style="font-size:11px; color:#94a3b8;">${c.exclusions || 'None'}</td>`;
                     tbody.appendChild(ctr);
                 });
@@ -596,6 +625,12 @@
             const actBtn = e.target.closest('.act');
             if (actBtn) {
                 e.preventDefault();
+                const domAction = actBtn.dataset.domAction;
+                const domTarget = domAction ? domOfferActionMap.get(domAction) : null;
+                if (domTarget && document.contains(domTarget)) {
+                    domTarget.click();
+                    return;
+                }
                 let targetUrl = actBtn.dataset.h;
                 if (targetUrl) {
                     if (!targetUrl.startsWith('http')) {

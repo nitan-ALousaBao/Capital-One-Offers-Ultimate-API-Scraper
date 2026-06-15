@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Capital One Offers Ultimate (v46.0 Final)
 // @namespace    http://tampermonkey.net/
-// @version      46.1
+// @version      47.4
 // @description  完整版：脱离 Body 独立挂载，静默重生，告别 React 冲突
 // @author       ALousaBao
 // @match        https://capitaloneshopping.com/*
@@ -28,6 +28,8 @@
     let sortConfig = { key: 'reward', dir: 'desc' };
     let counts = { web: 0, email: 0, miles: 0 };
     let uiHostElement = null;
+    let webDomMergeObserver = null;
+    let webDomMergeTimer = null;
 
     const getConfig = () => ({
         url: (GM_getValue('c1_api_url', '')).trim(),
@@ -92,6 +94,187 @@
         refreshDisplay(); updateStatus();
     });
 
+    function extractSpendBackRewardFromText(text) {
+        const match = String(text || '').replace(/\s+/g, ' ').match(/get\s+\$?([\d,.]+)\s+back\s+when\s+you\s+spend\s+\$?([\d,.]+)\+?/i);
+        return match ? `Get $${match[1]} back when you spend $${match[2]}` : '';
+    }
+
+    function normalizeMerchantName(name) {
+        return String(name || '')
+            .toLowerCase()
+            .replace(/&/g, 'and')
+            .replace(/\b(the|inc|llc|ltd|co|company)\b/g, '')
+            .replace(/\.(com|net|org|us|co|shop|store)\b/g, '')
+            .replace(/[^a-z0-9]+/g, '');
+    }
+
+    function escapeRegExp(text) {
+        return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function extractSpendBackReward(item) {
+        const seen = new Set();
+        const strings = [];
+        function walk(value, depth = 0) {
+            if (value == null || depth > 5) return;
+            if (typeof value === 'string') {
+                const text = value.replace(/\s+/g, ' ').trim();
+                if (text) strings.push(text);
+                return;
+            }
+            if (typeof value !== 'object' || seen.has(value)) return;
+            seen.add(value);
+            if (Array.isArray(value)) {
+                value.forEach(v => walk(v, depth + 1));
+                return;
+            }
+            Object.entries(value).forEach(([key, child]) => {
+                if (/href|url|image|logo|src|icon/i.test(key)) return;
+                walk(child, depth + 1);
+            });
+        }
+        walk(item);
+        return extractSpendBackRewardFromText(strings.join(' '));
+    }
+
+    function formatCents(cents) {
+        const n = Number(cents);
+        if (!Number.isFinite(n)) return '';
+        const dollars = n / 100;
+        return `$${Number.isInteger(dollars) ? dollars.toFixed(0) : dollars.toFixed(2)}`;
+    }
+
+    function extractThresholdReward(item) {
+        const tiers = item?.stats?.rewardTiers;
+        if (!Array.isArray(tiers) || !tiers.length) return '';
+        const tier = tiers
+            .filter(t => t?.reward)
+            .sort((a, b) => (Number(b?.reward?.value) || 0) - (Number(a?.reward?.value) || 0))[0];
+        if (!tier) return '';
+
+        const reward = tier?.reward?.displayValue || formatCents(tier?.reward?.value);
+        const spend = tier?.displaySpendValue || tier?.displaySpendCents || formatCents(tier?.spendCents);
+        if (!reward || !spend) return '';
+        return `Get ${reward} back when you spend ${spend}`;
+    }
+
+    function buildDomSpendBackRewardQueues(root = document) {
+        const queues = {};
+        const cards = Array.from(root.querySelectorAll('.deal-list-item, [data-test-merchant-name]'))
+            .map(el => el.closest('.deal-list-item') || el);
+        cards.forEach(card => {
+            if (!card) return;
+            const reward = extractSpendBackRewardFromText(card.textContent);
+            if (!reward) return;
+            const merchant = (card.getAttribute('data-test-merchant-name')
+                || card.querySelector('[data-testid="deal-item-merchant-name"]')?.textContent
+                || '').replace(/\s+/g, ' ').trim();
+            if (!merchant) return;
+            const key = normalizeMerchantName(merchant);
+            if (!queues[key]) queues[key] = { merchant, rewards: [] };
+            if (!queues[key].rewards.includes(reward)) queues[key].rewards.push(reward);
+        });
+        return queues;
+    }
+
+    function takeDomSpendBackReward(queues, merchant) {
+        const key = normalizeMerchantName(merchant);
+        let queue = queues[key];
+        if (!queue || !queue.rewards.length) {
+            const fuzzyKey = Object.keys(queues).find(k => k && key && (k.includes(key) || key.includes(k)));
+            queue = fuzzyKey ? queues[fuzzyKey] : null;
+        }
+        return queue && queue.rewards.length ? queue.rewards[0] : findPageSpendBackRewardNearMerchant(merchant);
+    }
+
+    function findPageSpendBackRewardNearMerchant(merchant) {
+        const pageText = String(document.body?.innerText || document.body?.textContent || '').replace(/\s+/g, ' ');
+        const cleanMerchant = String(merchant || '').replace(/\.(com|net|org|us|co|shop|store)\b/ig, '').replace(/\s+/g, ' ').trim();
+        if (!pageText || !cleanMerchant) return '';
+
+        const after = pageText.match(new RegExp(`${escapeRegExp(cleanMerchant)}.{0,500}?get\\s+\\$?[\\d,.]+\\s+back\\s+when\\s+you\\s+spend\\s+\\$?[\\d,.]+`, 'i'));
+        if (after) return extractSpendBackRewardFromText(after[0]);
+
+        const before = pageText.match(new RegExp(`get\\s+\\$?[\\d,.]+\\s+back\\s+when\\s+you\\s+spend\\s+\\$?[\\d,.]+.{0,500}?${escapeRegExp(cleanMerchant)}`, 'i'));
+        return before ? extractSpendBackRewardFromText(before[0]) : '';
+    }
+
+    function domSpendBackQueuesToItems(queues) {
+        return Object.values(queues).flatMap(queue =>
+            queue.rewards.map(reward => ({
+                merchant: queue.merchant,
+                reward,
+                exclusions: 'From page offer',
+                link: '',
+                source: 'web'
+            }))
+        );
+    }
+
+    function mergeDomSpendBackRewards(queues) {
+        let changed = false;
+        Object.entries(queues).forEach(([key, queue]) => {
+            queue.rewards.forEach(reward => {
+                const exact = currentData.find(item =>
+                    item.source === 'web'
+                    && normalizeMerchantName(item.merchant) === key
+                    && item.reward === reward
+                );
+                if (exact) return;
+
+                const blank = currentData.find(item =>
+                    item.source === 'web'
+                    && normalizeMerchantName(item.merchant) === key
+                    && !String(item.reward || '').trim()
+                );
+                if (blank) {
+                    blank.reward = reward;
+                    changed = true;
+                    return;
+                }
+
+                currentData.push({
+                    merchant: queue.merchant,
+                    reward,
+                    exclusions: 'From page offer',
+                    link: '',
+                    source: 'web'
+                });
+                counts.web++;
+                changed = true;
+            });
+        });
+
+        currentData.forEach(item => {
+            if (item.source !== 'web' || String(item.reward || '').trim()) return;
+            const reward = findPageSpendBackRewardNearMerchant(item.merchant);
+            if (reward) {
+                item.reward = reward;
+                changed = true;
+            }
+        });
+        return changed;
+    }
+
+    function mergeWebDomRewardsAndRefresh() {
+        if (!currentData.some(item => item.source === 'web')) return;
+        if (mergeDomSpendBackRewards(buildDomSpendBackRewardQueues())) {
+            refreshDisplay();
+            updateStatus();
+        }
+    }
+
+    function scheduleWebDomRewardMerge(delay = 250) {
+        clearTimeout(webDomMergeTimer);
+        webDomMergeTimer = setTimeout(mergeWebDomRewardsAndRefresh, delay);
+    }
+
+    function watchWebDomRewards() {
+        if (webDomMergeObserver || !document.body) return;
+        webDomMergeObserver = new MutationObserver(() => scheduleWebDomRewardMerge(400));
+        webDomMergeObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+    }
+
     function getWeight(s) {
         if (!s) return { type: 0, val: 0 };
         s = String(s);
@@ -109,12 +292,23 @@
     }
 
     function pushDataBatch(newItems, type) {
-        if (!Array.isArray(newItems)) return;
+        if (!Array.isArray(newItems)) return 0;
+        let added = 0;
         newItems.forEach(item => {
-            currentData.push({ merchant: item.merchant, reward: item.reward, exclusions: item.exclusions, link: item.link, source: type });
+            const next = { merchant: item.merchant, reward: item.reward, exclusions: item.exclusions, link: item.link, source: type };
+            const nextKey = normalizeMerchantName(next.merchant);
+            const nextReward = String(next.reward || '').trim();
+            if (nextReward && currentData.some(existing =>
+                existing.source === type
+                && normalizeMerchantName(existing.merchant) === nextKey
+                && String(existing.reward || '').trim() === nextReward
+            )) return;
+            currentData.push(next);
             counts[type]++;
+            added++;
         });
         updateStatus();
+        return added;
     }
 
     function refreshDisplay() {
@@ -195,6 +389,7 @@
         let webToken = null, pages = 0;
         while (pages < 25) {
             try {
+                const domSpendBackRewards = buildDomSpendBackRewardQueues();
                 const res = await gmFetch('https://capitaloneshopping.com/api/v1/feed', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ "contentProps": {"pagination": {"limit": 100, ...(webToken?{"nextPageToken":webToken}:{})}}, "context": {"location": {"state": conf.state, "zipcode": conf.zip}}})
@@ -202,17 +397,28 @@
                 const d = await res.json();
                 if (!d.items || !Array.isArray(d.items)) break;
 
-                pushDataBatch(d.items.map(i => ({
-                    merchant: i.merchantName || i.merchantDisplayText || 'Unknown',
-                    reward: i?.stats?.cashbackV2 || i?.stats?.cashback || '',
-                    exclusions: i?.stats?.exclusionsText || 'None',
-                    link: i.href || '',
-                    source: 'web'
-                })), 'web');
+                pushDataBatch(domSpendBackQueuesToItems(domSpendBackRewards), 'web');
+                pushDataBatch(d.items.map(i => {
+                    const rawReward = i?.stats?.cashbackV2 || i?.stats?.cashback || extractThresholdReward(i) || extractSpendBackReward(i) || takeDomSpendBackReward(domSpendBackRewards, i.merchantName || i.merchantDisplayText);
+                    const exclusions = i?.stats?.exclusionsText || 'None';
+                    return {
+                        merchant: i.merchantName || i.merchantDisplayText || 'Unknown',
+                        reward: rawReward || '',
+                        exclusions,
+                        link: i.href || '',
+                        source: 'web'
+                    };
+                }), 'web');
+                pushDataBatch(domSpendBackQueuesToItems(buildDomSpendBackRewardQueues()), 'web');
+                mergeWebDomRewardsAndRefresh();
                 webToken = d.pagination?.nextPageToken;
                 pages++; if (!webToken) break;
             } catch(e) { break; }
         }
+        pushDataBatch(domSpendBackQueuesToItems(buildDomSpendBackRewardQueues()), 'web');
+        mergeDomSpendBackRewards(buildDomSpendBackRewardQueues());
+        [250, 1000, 2500, 5000].forEach(delay => setTimeout(mergeWebDomRewardsAndRefresh, delay));
+        watchWebDomRewards();
         refreshDisplay();
     }
 

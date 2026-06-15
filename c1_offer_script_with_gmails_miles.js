@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Capital One Offers Ultimate (v46.0 Final)
 // @namespace    http://tampermonkey.net/
-// @version      47.4
+// @version      47.5
 // @description  完整版：脱离 Body 独立挂载，静默重生，告别 React 冲突
 // @author       ALousaBao
 // @match        https://capitaloneshopping.com/*
@@ -355,6 +355,7 @@
         tbody.innerHTML = '';
         arr.forEach((g, idx) => {
             const best = g.items[0];
+            const fallbackLink = g.items.find(i => i.link)?.link || '';
             const gid = `g-${idx}`;
             const tr = document.createElement('tr');
             if(best.reward.includes('✈️')) tr.style.borderLeft = '4px solid #0ea5e9';
@@ -362,7 +363,7 @@
 
             const actionCell = (best.source === 'miles')
                 ? `<small style="color:#64748b; font-weight:600;">✈️ Miles Offer</small>`
-                : `<button type="button" class="act" data-h="${best.link}">🚀 Go</button>`;
+                : `<button type="button" class="act" data-h="${best.link || fallbackLink}">🚀 Go</button>`;
 
             tr.innerHTML = `<td style="width:180px"><strong>${best.merchant}</strong> ${g.items.length > 1 ? `<button type="button" class="tgl" data-t="${gid}">▶ ${g.items.length-1}</button>` : ''}</td><td style="color:#15803d; font-weight:bold; width:120px;">${best.reward}</td><td style="width:80px">${actionCell}</td><td style="color:#64748b; font-size:11px;">${best.exclusions || 'None'}</td>`;
             tbody.appendChild(tr);
@@ -375,7 +376,7 @@
                     ctr.style.backgroundColor = '#f8fafc';
                     const childAction = (c.source === 'miles')
                         ? `<small style="color:#94a3b8;">✈️ Miles</small>`
-                        : `<button type="button" class="act" data-h="${c.link}">🚀</button>`;
+                        : `<button type="button" class="act" data-h="${c.link || fallbackLink}">🚀</button>`;
                     ctr.innerHTML = `<td style="padding-left:25px; color:#475569;">↳ ${c.merchant}</td><td style="color:#475569;">${c.reward}</td><td>${childAction}</td><td style="font-size:11px; color:#94a3b8;">${c.exclusions || 'None'}</td>`;
                     tbody.appendChild(ctr);
                 });
